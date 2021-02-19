@@ -2,7 +2,7 @@
 
 See "example_bmp.c" for utilization details.
 
-To switch between I²C and SPI, comment out `spi_init()`/`i2c_init()`
+To switch between I²C and SPI, set the last parameter of `bmp_init` to either USE_SPI or USE_I2C
 
 Datasheet: https://cdn-shop.adafruit.com/datasheets/BST-BMP280-DS001-11.pdf
 
