@@ -1,5 +1,6 @@
 ///@file bmp.c
 
+#include <stdlib.h>
 #include <stdint.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -9,26 +10,25 @@
 #include <linux/i2c-dev.h>
 #include <time.h>
 
-#include <iobb.h>
-#include "BMP280driver/bmp280.h"
+#include "bmp280.h"
 
-#define AUTOCS 1
+#define AUTOCS 0
 
-typedef struct
-{
-    int header;
-    int pin;
-} Pin;
-
-const Pin cs_pin = {8, 11};
+FILE *cs;
 
 static const char *spi_device = "/dev/spidev0.0";
 static const char *i2c_device = "/dev/i2c-2";
-static uint32_t mode = 0;
+static uint32_t mode = 3;
 static uint8_t bits = 8;
 static uint32_t speed = 500000;
 static uint16_t delay;
 static int fd;
+
+void set_pin(FILE* pin, int val)
+{
+    fprintf(pin, "%d", val);
+    fflush(pin);
+}
 
 /*!
  *  @brief Internal SPI transfer helper function.
@@ -52,12 +52,12 @@ int8_t transfer(uint8_t const *tx, uint8_t const *rx, size_t len)
     };
 
     if (!AUTOCS)
-        pin_low(cs_pin.header, cs_pin.pin);
+	set_pin(cs, 0);
 
     ret = ioctl(fd, SPI_IOC_MESSAGE(1), &tr);
 
     if (!AUTOCS)
-        pin_high(cs_pin.header, cs_pin.pin);
+	set_pin(cs, 1);
 
     return ret < 0;
 }
@@ -180,7 +180,7 @@ int8_t i2c_reg_read(uint8_t i2c_addr, uint8_t reg_addr, uint8_t *reg_data, uint1
     {
         i2c_reg_write(0, BMP280_CTRL_MEAS_ADDR, "\x55", 1);
 
-        uint8_t status[2] = {0, 0};
+        uint8_t status[2] = {0,0};
         i2c_reg_read(0, BMP280_STATUS_ADDR, status, 1);
 
         while (status[0] & 0x08)
@@ -190,7 +190,7 @@ int8_t i2c_reg_read(uint8_t i2c_addr, uint8_t reg_addr, uint8_t *reg_data, uint1
         }
     }
 
-    uint8_t dt[2] = {reg_addr, 0};
+    uint8_t dt[2] = {reg_addr,0};
     write(fd, dt, 1);
 
     return read(fd, reg_data, length) < 0 ? -1 : 0;
@@ -217,7 +217,7 @@ void print_rslt(const char api_name[], int8_t rslt)
         else if (rslt == BMP280_E_DEV_NOT_FOUND)
             printf("Error [%d] : Device not found\r\n", rslt);
         else
-            // For more error codes refer "*_defs.h" */
+            /* For more error codes refer "*_defs.h" */
             printf("Error [%d] : Unknown error code\r\n", rslt);
     }
 }
@@ -233,6 +233,8 @@ void print_rslt(const char api_name[], int8_t rslt)
  */
 int spi_init(struct bmp280_dev *bmp)
 {
+    FILE *cs_dir;
+
     int ret = 0;
     fd = open(spi_device, O_RDWR);
 
@@ -245,11 +247,16 @@ int spi_init(struct bmp280_dev *bmp)
     ret |= ioctl(fd, SPI_IOC_WR_MAX_SPEED_HZ, &speed);
     ret |= ioctl(fd, SPI_IOC_RD_MAX_SPEED_HZ, &speed);
 
-    if (!AUTOCS)
-    {
-        iolib_init();
-        iolib_setdir(cs_pin.header, cs_pin.pin, DigitalOut);
-    }
+    cs_dir = fopen( "/sys/class/gpio/gpio49/direction" , "w" ); // P9_23
+
+    fseek(cs_dir,0,SEEK_SET);
+    fprintf(cs_dir,"out");
+
+    fclose(cs_dir);
+
+    cs = fopen( "/sys/class/gpio/gpio49/value" , "w" );
+
+    fseek(cs,0,SEEK_SET);
 
     bmp->dev_id = 0;
     bmp->read = spi_reg_read;
@@ -291,8 +298,12 @@ int i2c_init(struct bmp280_dev *bmp)
  */
 void close_all(struct bmp280_dev bmp)
 {
+    if (bmp.intf != BMP280_I2C_INTF)
+    {
+    	fclose(cs);
+    }
+
     close(fd);
-    iolib_free();
 }
 
 /*!
@@ -306,9 +317,15 @@ void close_all(struct bmp280_dev bmp)
  *  @retval 0 -> Success
  *  @retval -1 -> Failure 
  */
-int bmp_init(struct bmp280_dev *bmp, struct bmp280_config *conf, struct bmp280_uncomp_data *ucomp_data)
+int bmp_init(struct bmp280_dev *bmp, struct bmp280_config *conf, struct bmp280_uncomp_data *ucomp_data, uint8_t use_spi)
 {
     int rslt;
+    if(use_spi) {
+        rslt = spi_init(bmp);
+    } else {
+        rslt = i2c_init(bmp);
+    }
+
     bmp->delay_ms = bdelay_ms;
 
     rslt = bmp280_init(bmp);
@@ -328,47 +345,17 @@ int bmp_init(struct bmp280_dev *bmp, struct bmp280_config *conf, struct bmp280_u
     rslt |= bmp280_get_uncomp_data(ucomp_data, bmp);
 
     bmp->delay_ms(100);
+
+    return rslt;
 }
 
-int main(int argc, char *argv[])
+int get_values(double *temp, double *pres, struct bmp280_dev *bmp, struct bmp280_uncomp_data *ucomp_data) 
 {
-    int8_t rslt;
-    struct bmp280_dev bmp;
-    struct bmp280_config conf;
-    struct bmp280_uncomp_data ucomp_data;
-    double pres, temp;
-    // Pick from either SPI or I2C below, no other code has to be changed:
+    int rslt;
+    rslt = bmp280_get_uncomp_data(ucomp_data, bmp);
 
-    rslt = spi_init(&bmp);
-    //rslt = i2c_init(&bmp);
+    rslt |= bmp280_get_comp_temp_double(temp, ucomp_data->uncomp_temp, bmp);
+    rslt |= bmp280_get_comp_pres_double(pres, ucomp_data->uncomp_press, bmp);
 
-    // IIR filter
-    conf.filter = BMP280_FILTER_OFF;
-    // Temperature over sampling
-    conf.os_temp = BMP280_OS_2X;
-    // Pressure over sampling
-    conf.os_pres = BMP280_OS_16X;
-    // Setting the output data period as 500us
-    conf.odr = BMP280_ODR_0_5_MS;
-
-    bmp_init(&bmp, &conf, &ucomp_data);
-
-    while (1)
-    {
-        // Reading the raw data from sensor
-        rslt |= bmp280_get_uncomp_data(&ucomp_data, &bmp);
-
-        // Getting the compensated temperature as floating point value
-        rslt |= bmp280_get_comp_temp_double(&temp, ucomp_data.uncomp_temp, &bmp);
-        rslt |= bmp280_get_comp_pres_double(&pres, ucomp_data.uncomp_press, &bmp);
-
-        printf("Temperature: %.2f C \r\nPressure: %.2f hPa \r\n", temp, pres / 100);
-
-        // Sleep time between measurements mins out at BMP280_ODR
-        bmp.delay_ms(10);
-    }
-
-    // Unreachable code, here in case I decide to change it in the future
-    close_all(bmp);
     return rslt;
 }

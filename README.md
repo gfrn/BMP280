@@ -1,6 +1,6 @@
 # BMP280 SPI communication 
 
-See "bmp.c" for utilization details.
+See "example_bmp.c" for utilization details.
 
 To switch between I²C and SPI, comment out `spi_init()`/`i2c_init()`
 
